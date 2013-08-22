@@ -17,7 +17,9 @@ namespace MassTransit.BusConfigurators
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Linq;
+    using System.Reflection;
     using Builders;
     using Configuration;
     using Configurators;
@@ -27,10 +29,10 @@ namespace MassTransit.BusConfigurators
     using SubscriptionConfigurators;
     using Transports;
 
-	/// <summary>
-	/// <see cref="ServiceBusConfigurator"/>. Core implementation of service bus
-	/// configurator.
-	/// </summary>
+    /// <summary>
+    /// <see cref="ServiceBusConfigurator"/>. Core implementation of service bus
+    /// configurator.
+    /// </summary>
     public class ServiceBusConfiguratorImpl :
         ServiceBusConfigurator
     {
@@ -85,7 +87,7 @@ namespace MassTransit.BusConfigurators
             _builderFactory = builderFactory;
         }
 
-        public void AddSubscriptionCoordinatorConfigurator(SubscriptionRouterBuilderConfigurator configurator)
+        public void AddSubscriptionRouterConfigurator(SubscriptionRouterBuilderConfigurator configurator)
         {
             _subscriptionRouterConfigurator.AddConfigurator(configurator);
         }
@@ -103,6 +105,11 @@ namespace MassTransit.BusConfigurators
         public void SetNetwork(string network)
         {
             _settings.Network = network.IsEmpty() ? null : network;
+        }
+
+        public void DisablePerformanceCounters()
+        {
+            _settings.EnablePerformanceCounters = false;
         }
 
         public void BeforeConsumingMessage(Action beforeConsume)
@@ -145,9 +152,7 @@ namespace MassTransit.BusConfigurators
 
         public IServiceBus CreateServiceBus()
         {
-            _log.InfoFormat("MassTransit v{0}, .NET Framework v{1}",
-                typeof (ServiceBusFactory).Assembly.GetName().Version,
-                Environment.Version);
+            LogAssemblyVersionInformation();
 
             IEndpointCache endpointCache = CreateEndpointCache();
             _settings.EndpointCache = endpointCache;
@@ -156,8 +161,8 @@ namespace MassTransit.BusConfigurators
 
             _subscriptionRouterConfigurator.SetNetwork(_settings.Network);
 
-			// run through all configurators that have been set and let
-			// them do their magic
+            // run through all configurators that have been set and let
+            // them do their magic
             foreach (BusBuilderConfigurator configurator in _configurators)
             {
                 builder = configurator.Configure(builder);
@@ -168,19 +173,37 @@ namespace MassTransit.BusConfigurators
             return bus;
         }
 
-		/// <summary>
-		/// This lets you change the bus settings without
-		/// having to implement a <see cref="BusBuilderConfigurator"/>
-		/// first. Use with caution.
-		/// </summary>
-		/// <param name="callback">The callback that changes the settings.</param>
-        public void ChangeSettings([NotNull] Action<ServiceBusSettings> callback)
-		{
-			if (callback == null) throw new ArgumentNullException("callback");
-			callback(_settings);
-		}
+        static void LogAssemblyVersionInformation()
+        {
+            if (_log.IsInfoEnabled)
+            {
+                var assembly = typeof(ServiceBusFactory).Assembly;
 
-		IEndpointCache CreateEndpointCache()
+                var assemblyVersion = assembly.GetName().Version;
+                FileVersionInfo assemblyFileVersionInfo = FileVersionInfo.GetVersionInfo(assembly.Location);
+
+                string assemblyFileVersion = assemblyFileVersionInfo.FileVersion;
+
+                _log.InfoFormat("MassTransit v{0}/v{1}, .NET Framework v{2}",
+                    assemblyFileVersion,
+                    assemblyVersion,
+                    Environment.Version);
+            }
+        }
+
+        /// <summary>
+        /// This lets you change the bus settings without
+        /// having to implement a <see cref="BusBuilderConfigurator"/>
+        /// first. Use with caution.
+        /// </summary>
+        /// <param name="callback">The callback that changes the settings.</param>
+        public void ChangeSettings([NotNull] Action<ServiceBusSettings> callback)
+        {
+            if (callback == null) throw new ArgumentNullException("callback");
+            callback(_settings);
+        }
+
+        IEndpointCache CreateEndpointCache()
         {
             if (_settings.EndpointCache != null)
                 return _settings.EndpointCache;

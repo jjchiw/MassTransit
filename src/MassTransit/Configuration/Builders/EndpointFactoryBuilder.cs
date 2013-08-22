@@ -64,13 +64,33 @@ namespace MassTransit.Builders
 		/// <summary>
 		/// Adds a transport factory to the builder
 		/// </summary>
-		/// <param name="transportFactory"></param>
 		void AddTransportFactory(ITransportFactory transportFactory);
+
+        /// <summary>
+        /// Add a message serializer to the builder so that messages with other serialization types
+        /// can be received without conflicts
+        /// </summary>
+        /// <param name="serializer"></param>
+	    void AddMessageSerializer(IMessageSerializer serializer);
 
 		/// <summary>
 		/// Sets the default isolation level for transports that perform transactional operations
 		/// </summary>
-		/// <param name="isolationLevel"></param>
 		void SetDefaultIsolationLevel(IsolationLevel isolationLevel);
+
+        /// <summary>
+        /// Sets the default retry limit for inbound messages
+        /// </summary>
+	    void SetDefaultRetryLimit(int retryLimit);
+
+        /// <summary>
+        /// Sets the default message tracker factory for all endpoints
+        /// </summary>
+	    void SetDefaultInboundMessageTrackerFactory(MessageTrackerFactory messageTrackerFactory);
+
+        /// <summary>
+        /// Sets the supported message serializers for all endpoints
+        /// </summary>
+        void SetSupportedMessageSerializers(ISupportedMessageSerializers supportedSerializers);
 	}
 }

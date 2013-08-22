@@ -1,30 +1,31 @@
-﻿// Copyright 2007-2011 Chris Patterson, Dru Sellers, Travis Smith, et. al.
+﻿// Copyright 2007-2012 Chris Patterson, Dru Sellers, Travis Smith, et. al.
 //  
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use 
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use
 // this file except in compliance with the License. You may obtain a copy of the 
 // License at 
 // 
 //     http://www.apache.org/licenses/LICENSE-2.0 
 // 
-// Unless required by applicable law or agreed to in writing, software distributed 
+// Unless required by applicable law or agreed to in writing, software distributed
 // under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR 
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the 
 // specific language governing permissions and limitations under the License.
 namespace MassTransit.Transports.RabbitMq
 {
     using System;
+    using System.Collections.Generic;
     using System.IO;
+    using System.Linq;
     using System.Text;
-    using System.Threading;
     using Context;
     using Logging;
-    using RabbitMQ.Client;
+    using RabbitMQ.Client.Events;
     using RabbitMQ.Client.Exceptions;
 
     public class InboundRabbitMqTransport :
         IInboundTransport
     {
-        static readonly ILog _log = Logger.Get(typeof (InboundRabbitMqTransport));
+        static readonly ILog _log = Logger.Get(typeof(InboundRabbitMqTransport));
 
         readonly IRabbitMqEndpointAddress _address;
         readonly ConnectionHandler<RabbitMqConnection> _connectionHandler;
@@ -32,11 +33,12 @@ namespace MassTransit.Transports.RabbitMq
         readonly bool _purgeExistingMessages;
         RabbitMqConsumer _consumer;
         bool _disposed;
+        RabbitMqPublisher _publisher;
 
         public InboundRabbitMqTransport(IRabbitMqEndpointAddress address,
-                                        ConnectionHandler<RabbitMqConnection> connectionHandler,
-                                        bool purgeExistingMessages,
-                                        IMessageNameFormatter messageNameFormatter)
+            ConnectionHandler<RabbitMqConnection> connectionHandler,
+            bool purgeExistingMessages,
+            IMessageNameFormatter messageNameFormatter)
         {
             _address = address;
             _connectionHandler = connectionHandler;
@@ -60,25 +62,22 @@ namespace MassTransit.Transports.RabbitMq
 
             _connectionHandler.Use(connection =>
                 {
-                    BasicGetResult result = null;
+                    BasicDeliverEventArgs result = null;
                     try
                     {
-                        result = _consumer.Get();
+                        result = _consumer.Get(timeout);
                         if (result == null)
-                        {
-                            Thread.Sleep(10);
                             return;
-                        }
 
                         using (var body = new MemoryStream(result.Body, false))
                         {
-                            ReceiveContext context = ReceiveContext.FromBodyStream(body);
+                            ReceiveContext context = ReceiveContext.FromBodyStream(body, true);
                             context.SetMessageId(result.BasicProperties.MessageId ?? result.DeliveryTag.ToString());
                             result.BasicProperties.MessageId = context.MessageId;
                             context.SetInputAddress(_address);
 
                             byte[] contentType = result.BasicProperties.IsHeadersPresent()
-                                                     ? (byte[]) result.BasicProperties.Headers["Content-Type"]
+                                                     ? (byte[])result.BasicProperties.Headers["Content-Type"]
                                                      : null;
                             if (contentType != null)
                             {
@@ -99,6 +98,10 @@ namespace MassTransit.Transports.RabbitMq
                                 _consumer.MessageCompleted(result);
                             }
                         }
+                    }
+                    catch (AlreadyClosedException ex)
+                    {
+                        throw new InvalidConnectionException(_address.Uri, "Connection was already closed", ex);
                     }
                     catch (EndOfStreamException ex)
                     {
@@ -123,7 +126,48 @@ namespace MassTransit.Transports.RabbitMq
         public void Dispose()
         {
             Dispose(true);
-            GC.SuppressFinalize(this);
+        }
+
+        public IEnumerable<Type> BindExchangesForPublisher(Type messageType, IMessageNameFormatter messageNameFormatter)
+        {
+            AddPublisherBinding();
+
+            IList<Type> messageTypes = new List<Type>();
+            _connectionHandler.Use(connection =>
+                {
+                    MessageName messageName = messageNameFormatter.GetMessageName(messageType);
+
+                    _publisher.ExchangeDeclare(messageName.ToString());
+                    messageTypes.Add(messageType);
+
+                    foreach (Type type in messageType.GetMessageTypes().Skip(1))
+                    {
+                        MessageName interfaceName = messageNameFormatter.GetMessageName(type);
+
+                        _publisher.ExchangeBind(interfaceName.ToString(), messageName.ToString());
+                        messageTypes.Add(type);
+                    }
+                });
+
+            return messageTypes;
+        }
+
+        public void BindSubscriberExchange(IRabbitMqEndpointAddress address, string exchangeName)
+        {
+            AddPublisherBinding();
+            _connectionHandler.Use(connection =>
+                {
+                    _publisher.ExchangeBind(address.Name, exchangeName);
+                });
+        }
+
+        public void UnbindSubscriberExchange(string exchangeName)
+        {
+            AddPublisherBinding();
+            _connectionHandler.Use(connection =>
+            {
+                _publisher.ExchangeUnbind(_address.Name, exchangeName);
+            });            
         }
 
         void AddConsumerBinding()
@@ -136,28 +180,39 @@ namespace MassTransit.Transports.RabbitMq
             _connectionHandler.AddBinding(_consumer);
         }
 
-        void RemoveConsumer()
+        void AddPublisherBinding()
+        {
+            if (_publisher != null)
+                return;
+
+            _publisher = new RabbitMqPublisher();
+
+            _connectionHandler.AddBinding(_publisher);
+        }
+
+        void RemoveConsumerBinding()
         {
             if (_consumer != null)
-            {
                 _connectionHandler.RemoveBinding(_consumer);
-            }
+        }
+
+        void RemovePublisherBinding()
+        {
+            if (_publisher != null)
+                _connectionHandler.RemoveBinding(_publisher);
         }
 
         void Dispose(bool disposing)
         {
-            if (_disposed) return;
+            if (_disposed)
+                return;
             if (disposing)
             {
-                RemoveConsumer();
+                RemoveConsumerBinding();
+                RemovePublisherBinding();
             }
 
             _disposed = true;
-        }
-
-        ~InboundRabbitMqTransport()
-        {
-            Dispose(false);
         }
     }
 }

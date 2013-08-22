@@ -38,7 +38,6 @@ namespace MassTransit.Transports.RabbitMq
         public void Dispose()
         {
             Dispose(true);
-            GC.SuppressFinalize(this);
         }
 
         public void Connect()
@@ -54,16 +53,26 @@ namespace MassTransit.Transports.RabbitMq
             {
                 if (_connection != null)
                 {
-                    if (_connection.IsOpen)
-                        _connection.Close(200, "disconnected");
+                    try
+                    {
+                        if (_connection.IsOpen)
+                            _connection.Close(200, "disconnected");
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Warn("Exception while closing RabbitMQ connection", ex);
+                    }
 
                     _connection.Dispose();
-                    _connection = null;
                 }
             }
             catch (Exception ex)
             {
-                _log.Warn("Failed to close RabbitMQ connection.", ex);
+                _log.Warn("Exception disposing of RabbitMQ connection", ex);
+            }
+            finally
+            {
+                _connection = null;
             }
         }
 

@@ -1,12 +1,12 @@
-// Copyright 2007-2011 Chris Patterson, Dru Sellers, Travis Smith, et. al.
+// Copyright 2007-2012 Chris Patterson, Dru Sellers, Travis Smith, et. al.
 //  
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use 
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use
 // this file except in compliance with the License. You may obtain a copy of the 
 // License at 
 // 
 //     http://www.apache.org/licenses/LICENSE-2.0 
 // 
-// Unless required by applicable law or agreed to in writing, software distributed 
+// Unless required by applicable law or agreed to in writing, software distributed
 // under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR 
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the 
 // specific language governing permissions and limitations under the License.
@@ -21,6 +21,7 @@ namespace MassTransit.Transports.RabbitMq
     using RabbitMQ.Client;
     using Util;
 
+
     public class RabbitMqEndpointAddress :
         IRabbitMqEndpointAddress
     {
@@ -28,26 +29,50 @@ namespace MassTransit.Transports.RabbitMq
             "The path can be empty, or a sequence of these characters: letters, digits, hyphen, underscore, period, or colon.";
 
         static readonly string LocalMachineName = Environment.MachineName.ToLowerInvariant();
-
         static readonly Regex _regex = new Regex(@"^[A-Za-z0-9\-_\.:]+$");
+        readonly bool _autoDelete;
         readonly ConnectionFactory _connectionFactory;
+        readonly bool _durable = true;
+        readonly bool _exclusive;
         readonly bool _isHighAvailable;
-
         readonly bool _isTransactional;
         readonly string _name;
         readonly Uri _uri;
         Func<bool> _isLocal;
-
+        ushort _prefetch;
+        int _ttl;
 
         public RabbitMqEndpointAddress(Uri uri, ConnectionFactory connectionFactory, string name)
         {
-            _uri = new Uri(uri.GetLeftPart(UriPartial.Path));
+            _uri = GetSanitizedUri(uri).Uri;
+
             _connectionFactory = connectionFactory;
+
+            if (name == "*")
+                name = NewId.Next().ToString("NS");
+
             _name = name;
 
             _isTransactional = uri.Query.GetValueFromQueryString("tx", false);
-            _isLocal = () => DetermineIfEndpointIsLocal(_uri);
+            _isLocal = () => DetermineIfEndpointIsLocal(uri);
+
+            _ttl = uri.Query.GetValueFromQueryString("ttl", 0);
+            _prefetch = uri.Query.GetValueFromQueryString("prefetch", (ushort)Math.Max(Environment.ProcessorCount, 10));
+
+            bool isTemporary = uri.Query.GetValueFromQueryString("temporary", false);
+
             _isHighAvailable = uri.Query.GetValueFromQueryString("ha", false);
+            if (_isHighAvailable && isTemporary)
+                throw new RabbitMqAddressException("A highly available queue cannot be temporary");
+
+            _durable = uri.Query.GetValueFromQueryString("durable", !isTemporary);
+            _exclusive = uri.Query.GetValueFromQueryString("exclusive", isTemporary);
+            _autoDelete = uri.Query.GetValueFromQueryString("autodelete", isTemporary);
+        }
+
+        public bool Exclusive
+        {
+            get { return _exclusive; }
         }
 
         public ConnectionFactory ConnectionFactory
@@ -60,11 +85,14 @@ namespace MassTransit.Transports.RabbitMq
             get { return _name; }
         }
 
+        public ushort PrefetchCount
+        {
+            get { return _prefetch; }
+        }
+
         public IRabbitMqEndpointAddress ForQueue(string name)
         {
-            string uri = _uri.ToString();
-            uri = uri.Remove(uri.Length - _name.Length);
-            return new RabbitMqEndpointAddress(new Uri(uri).AppendToPath(name), _connectionFactory, name);
+            return ForQueue(_uri, name);
         }
 
         public Uri Uri
@@ -82,9 +110,61 @@ namespace MassTransit.Transports.RabbitMq
             get { return _isTransactional; }
         }
 
+        public bool Durable
+        {
+            get { return _durable; }
+        }
+
+        public bool AutoDelete
+        {
+            get { return _autoDelete; }
+        }
+
         public IDictionary QueueArguments()
         {
-            return !_isHighAvailable ? null : new Hashtable {{"x-ha-policy", "all"}};
+            var ht = new Hashtable();
+
+            if (_isHighAvailable)
+                ht.Add("x-ha-policy", "all");
+            if (_ttl > 0)
+                ht.Add("x-message-ttl", _ttl);
+
+            return ht.Keys.Count == 0
+                       ? null
+                       : ht;
+        }
+
+        public IRabbitMqEndpointAddress ForQueue(Uri originalUri, string name)
+        {
+            var uri = new Uri(originalUri.GetLeftPart(UriPartial.Path));
+            if (uri.AbsolutePath.EndsWith(_name, StringComparison.InvariantCultureIgnoreCase))
+            {
+                var builder = new UriBuilder(uri.Scheme, uri.Host, uri.Port,
+                    uri.AbsolutePath.Remove(uri.AbsolutePath.Length - _name.Length) + name);
+                //builder.Query = uri.Query;
+
+                return new RabbitMqEndpointAddress(builder.Uri, _connectionFactory, name);
+            }
+
+            throw new InvalidOperationException("Uri is not properly formed");
+        }
+
+        public void SetTtl(TimeSpan ttl)
+        {
+            _ttl = ttl.Milliseconds;
+        }
+
+        public void SetPrefetchCount(ushort count)
+        {
+            _prefetch = count;
+        }
+
+        static UriBuilder GetSanitizedUri(Uri uri)
+        {
+            var uriPath = new Uri(uri.GetLeftPart(UriPartial.Path));
+            var builder = new UriBuilder(uriPath.Scheme, uriPath.Host, uriPath.Port, uriPath.PathAndQuery);
+            builder.Query = string.IsNullOrEmpty(uri.Query) ? "" : uri.Query.Substring(1);
+            return builder;
         }
 
         public override string ToString()
@@ -95,9 +175,9 @@ namespace MassTransit.Transports.RabbitMq
         bool DetermineIfEndpointIsLocal(Uri uri)
         {
             string hostName = uri.Host;
-            bool local = string.Compare(hostName, ".") == 0 ||
-                         string.Compare(hostName, "localhost", true) == 0 ||
-                         string.Compare(uri.Host, LocalMachineName, true) == 0;
+            bool local = string.CompareOrdinal(hostName, ".") == 0 ||
+                         string.Compare(hostName, "localhost", StringComparison.OrdinalIgnoreCase) == 0 ||
+                         string.Compare(uri.Host, LocalMachineName, StringComparison.OrdinalIgnoreCase) == 0;
 
             Interlocked.Exchange(ref _isLocal, () => local);
 
@@ -113,12 +193,14 @@ namespace MassTransit.Transports.RabbitMq
         {
             Guard.AgainstNull(address, "address");
 
-            if (string.Compare("rabbitmq", address.Scheme, true) != 0)
+            if (string.Compare("rabbitmq", address.Scheme, StringComparison.OrdinalIgnoreCase) != 0)
                 throw new RabbitMqAddressException("The invalid scheme was specified: " + address.Scheme ?? "(null)");
 
             var connectionFactory = new ConnectionFactory
                 {
                     HostName = address.Host,
+                    UserName = "",
+                    Password = "",
                 };
 
             if (address.IsDefaultPort)
@@ -135,9 +217,7 @@ namespace MassTransit.Transports.RabbitMq
                     connectionFactory.Password = parts[1];
                 }
                 else
-                {
                     connectionFactory.UserName = address.UserInfo;
-                }
             }
 
             string name = address.AbsolutePath.Substring(1);
@@ -148,7 +228,27 @@ namespace MassTransit.Transports.RabbitMq
                 name = pathSegments[1];
             }
 
-            VerifyQueueOrExchangeNameIsLegal(name);
+            ushort heartbeat = address.Query.GetValueFromQueryString("heartbeat", connectionFactory.RequestedHeartbeat);
+            connectionFactory.RequestedHeartbeat = heartbeat;
+
+            if (name == "*")
+            {
+                string uri = address.GetLeftPart(UriPartial.Path);
+                if (uri.EndsWith("*"))
+                {
+                    name = NewId.Next().ToString("NS");
+                    uri = uri.Remove(uri.Length - 1) + name;
+
+                    var builder = new UriBuilder(uri);
+                    builder.Query = string.IsNullOrEmpty(address.Query) ? "" : address.Query.Substring(1);
+
+                    address = builder.Uri;
+                }
+                else
+                    throw new InvalidOperationException("Uri is not properly formed");
+            }
+            else
+                VerifyQueueOrExchangeNameIsLegal(name);
 
             return new RabbitMqEndpointAddress(address, connectionFactory, name);
         }

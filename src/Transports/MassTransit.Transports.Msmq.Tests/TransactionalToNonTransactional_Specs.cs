@@ -32,10 +32,17 @@ namespace MassTransit.Transports.Msmq.Tests
         [SetUp]
         public void Setup()
         {
-            MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_transactionalUri)).LocalName);
-            MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_nonTransactionalUri)).LocalName);
-            MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_transactionalUri + "_subscriptions")).LocalName);
-            MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_nonTransactionalUri + "_subscriptions")).LocalName);
+            if (MessageQueue.Exists(new MsmqEndpointAddress(new Uri(_transactionalUri)).LocalName))
+                MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_transactionalUri)).LocalName);
+
+            if (MessageQueue.Exists(new MsmqEndpointAddress(new Uri(_nonTransactionalUri)).LocalName))
+                MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_nonTransactionalUri)).LocalName);
+
+            if (MessageQueue.Exists(new MsmqEndpointAddress(new Uri(_transactionalUri + "_subscriptions")).LocalName))
+                MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_transactionalUri + "_subscriptions")).LocalName);
+
+            if (MessageQueue.Exists(new MsmqEndpointAddress(new Uri(_nonTransactionalUri + "_subscriptions")).LocalName))
+                MessageQueue.Delete(new MsmqEndpointAddress(new Uri(_nonTransactionalUri + "_subscriptions")).LocalName);
         }
 
         [Test]
@@ -43,18 +50,16 @@ namespace MassTransit.Transports.Msmq.Tests
         {
             using (IServiceBus transactionalBus = ServiceBusFactory.New(x =>
                 {
-                    x.UseMsmq();
+                    x.UseMsmq(m => m.UseMulticastSubscriptionClient());
                     x.ReceiveFrom(_transactionalUri);
-                    x.UseMulticastSubscriptionClient();
                     x.SetCreateMissingQueues(true);
                     x.SetCreateTransactionalQueues(true);
                 }))
             {
                 using (IServiceBus nonTransactionalBus = ServiceBusFactory.New(x =>
                     {
-                        x.UseMsmq();
+                        x.UseMsmq(m => m.UseMulticastSubscriptionClient());
                         x.ReceiveFrom(_nonTransactionalUri);
-                        x.UseMulticastSubscriptionClient();
                         x.SetCreateMissingQueues(true);
                         x.SetCreateTransactionalQueues(false);
                     }))
