@@ -47,8 +47,7 @@ namespace Starbucks.Barista
                         return ServiceBusFactory.New(sbc =>
                             {
                                 sbc.ReceiveFrom("msmq://localhost/starbucks_barista");
-                                sbc.UseMsmq();
-                                sbc.UseMulticastSubscriptionClient();
+								sbc.UseMsmq((x) => { x.UseMulticastSubscriptionClient(); });
 
                                 sbc.UseControlBus();
 
